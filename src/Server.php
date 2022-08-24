@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+declare(ticks=1);
 
 namespace WaiterHttp\Waiter;
 
@@ -15,9 +16,9 @@ class Server
     protected RequestHandlerInterface $handler;
 
     /**
-     * @var Socket
+     * @var ?\Socket
      */
-    protected $socket;
+    protected $socket = null;
 
     protected $routes = [];
 
@@ -27,7 +28,9 @@ class Server
         protected string $publicAssets,
     )
     {
-
+        pcntl_signal(SIGTERM, [$this, 'terminate']);
+        pcntl_signal(SIGHUP, [$this, 'restart']);
+        pcntl_signal(SIGINT, [$this, 'terminate']);
     }
 
     public function addRoute(string $route, callable $callback) {
@@ -49,62 +52,81 @@ class Server
         return $response;
     }
 
-    public function run()
+    protected function restart()
     {
+        $this->terminate();
+
         $this->socket = socket_create(AF_INET, SOCK_STREAM, 0);
         socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
         socket_bind($this->socket, $this->listenAddress, $this->listenPortNumber);
         socket_listen($this->socket);
+    }
+
+    public function run()
+    {
+        $this->restart();
 
         $originalReadSockets = [$this->socket];
         $writeSockets = NULL;
         $exceptSockets = [];
         while (true) {
-            $readSockets = $originalReadSockets;
-            $numChanged = socket_select($readSockets, $writeSockets, $exceptSockets, 0);
-            if ($numChanged === false) {
-                continue;
-            }
-
-            if ($numChanged === 0) {
-                continue;
-            }
-
-            foreach ($exceptSockets as $socket) {
-                echo 'Closing bad socket' . PHP_EOL;
-                socket_close($socket);
-                unset($readSockets[array_search($socket, $readSockets)]);
-                unset($exceptSockets[array_search($socket, $exceptSockets)]);
-            }
-
-            if (in_array($this->socket, $readSockets)) {
-                $originalReadSockets[] = $newSocket = socket_accept($this->socket);
-                unset($readSockets[array_search($this->socket, $readSockets)]);
-            }
-
-            foreach($readSockets as $currentSocket) {
-                $data = socket_read($currentSocket, 1024);
-                if ($data === false) {
-                    unset($originalReadSockets[array_search($currentSocket, $originalReadSockets)]);
+            if ($this->socket) {
+                $readSockets = $originalReadSockets;
+                $numChanged = socket_select($readSockets, $writeSockets, $exceptSockets, 0);
+                if ($numChanged === false) {
                     continue;
                 }
 
-                $data = trim($data);
-                if (!empty($data)) {
-                    $request = RequestSerializer::fromString($data);
-                    $response = $this->processRequest($request);
-                    $responseString = Serializer::toString($response);
-                    socket_write($currentSocket, $responseString, strlen($responseString));
-                    socket_close($currentSocket);
-                    unset($originalReadSockets[array_search($currentSocket, $originalReadSockets)]);
+                if ($numChanged === 0) {
+                    continue;
+                }
+
+                foreach ($exceptSockets as $socket) {
+                    echo 'Closing bad socket' . PHP_EOL;
+                    socket_close($socket);
+                    unset($readSockets[array_search($socket, $readSockets)]);
+                    unset($exceptSockets[array_search($socket, $exceptSockets)]);
+                }
+
+                if (in_array($this->socket, $readSockets)) {
+                    $originalReadSockets[] = $newSocket = socket_accept($this->socket);
+                    unset($readSockets[array_search($this->socket, $readSockets)]);
+                }
+
+                foreach($readSockets as $currentSocket) {
+                    $data = socket_read($currentSocket, 1024);
+                    if ($data === false) {
+                        unset($originalReadSockets[array_search($currentSocket, $originalReadSockets)]);
+                        continue;
+                    }
+
+                    $data = trim($data);
+                    if (!empty($data)) {
+                        $request = RequestSerializer::fromString($data);
+                        $response = $this->processRequest($request);
+                        $responseString = Serializer::toString($response);
+                        socket_write($currentSocket, $responseString, strlen($responseString));
+                        socket_close($currentSocket);
+                        unset($originalReadSockets[array_search($currentSocket, $originalReadSockets)]);
+                    }
                 }
             }
+            break;
         }
-        socket_close($this->socket);
+        $this->terminate();
     }
 
     public function setHandler($handler)
     {
         $this->handler = $handler;
+    }
+
+    protected function terminate()
+    {
+        if ($this->socket) {
+            socket_shutdown($this->socket);
+            socket_close($this->socket);
+            $this->socket = null;
+        }
     }
 }
