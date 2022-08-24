@@ -1,0 +1,8 @@
+.env
+/vendor/
+phinx.php
+/public/js/
+.vscode
+node_modules/
+data/uploads/
+composer.lock
